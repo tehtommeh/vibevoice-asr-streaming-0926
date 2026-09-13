@@ -134,8 +134,13 @@ def edit_text(
     system_prompt: Optional[str] = None,
     temperature: float = 0.2,
     api_key: Optional[str] = None,
+    allow_empty_instruction: bool = False,
 ) -> dict:
-    """Apply a spoken instruction to a passage and return the rewritten text."""
+    """Apply a spoken instruction to a passage and return the rewritten text.
+
+    Dictation cleanup has no instruction -- the whole task is in the system
+    prompt -- so that case opts out of the empty-instruction guard.
+    """
     key = (api_key or "").strip() or server_key()
     if not key:
         raise LLMError(
@@ -143,8 +148,10 @@ def edit_text(
             "OPENROUTER_API_KEY in the backend environment.",
             401,
         )
-    if not instruction.strip():
+    if not instruction.strip() and not allow_empty_instruction:
         raise LLMError("No instruction was transcribed -- try recording again.", 400)
+    if allow_empty_instruction and not text.strip():
+        raise LLMError("Nothing was dictated.", 400)
 
     model = model or DEFAULT_MODEL
     body = {
@@ -154,7 +161,10 @@ def edit_text(
             {"role": "system", "content": system_prompt or DEFAULT_SYSTEM_PROMPT},
             {
                 "role": "user",
-                "content": f"<passage>\n{text}\n</passage>\n\n<instruction>\n{instruction}\n</instruction>",
+                "content": (
+                    f"<passage>\n{text}\n</passage>"
+                    + (f"\n\n<instruction>\n{instruction}\n</instruction>" if instruction.strip() else "")
+                ),
             },
         ],
     }

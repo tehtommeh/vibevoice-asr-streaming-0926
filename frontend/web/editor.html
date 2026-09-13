@@ -17,7 +17,7 @@
     </div>
     <div class="brand-text">
       <h1>Voice Editing</h1>
-      <p>Select text · say what to change · VibeVoice → LLM</p>
+      <p>One key · dictates, or edits what you selected</p>
     </div>
   </div>
   <div class="topbar-right">
@@ -34,36 +34,40 @@
   <!-- ---------------------------------------------------------- settings -->
   <aside class="rail rail-left">
     <section class="panel">
-      <h2>OpenRouter</h2>
-      <div id="key-server" class="key-note ok" hidden>
-        Using the key from the backend environment. Nothing is stored in this browser.
+      <h2>Mode</h2>
+      <select id="mode" class="mode-select"></select>
+      <small class="hint" style="margin:8px 0 0">Each mode carries its own prompts, model and temperature.
+        On the desktop these will follow the focused app.</small>
+
+      <label class="field" style="margin-top:12px">
+        <span>Edit prompt <em>voice edit</em></span>
+        <textarea id="system-prompt" rows="7" spellcheck="false"></textarea>
+      </label>
+      <label class="field">
+        <span>Dictation prompt <em>cleanup</em></span>
+        <textarea id="dictation-prompt" rows="6" spellcheck="false"></textarea>
+      </label>
+      <div class="btn-row">
+        <button class="btn btn-primary" id="btn-save-mode">Save mode</button>
+        <button class="btn" id="btn-reset-modes">Reset all</button>
       </div>
-      <label class="field" id="key-field">
-        <span>API key</span>
-        <input type="password" id="api-key" placeholder="sk-or-v1-…" autocomplete="off" spellcheck="false">
-        <small>Kept in this browser's localStorage and sent to your local backend only.
-          To avoid storing it here, put <code>OPENROUTER_API_KEY</code> in <code>.env</code> and restart.</small>
-      </label>
+    </section>
 
-      <label class="field">
-        <span>Model <b id="model-count"></b></span>
-        <input type="text" id="model-search" placeholder="filter models…" spellcheck="false">
-        <select id="model" size="8"></select>
-        <small id="model-price">—</small>
-      </label>
-
-      <label class="field">
-        <span>Temperature <b id="temp-val">0.20</b></span>
-        <input type="range" id="temperature" min="0" max="1.5" step="0.05" value="0.2">
-      </label>
-
+    <section class="panel">
+      <h2>Behaviour</h2>
       <label class="switch">
+        <input type="checkbox" id="cleanup-dictation" checked>
+        <span>Clean up dictation</span>
+      </label>
+      <small class="switch-note">Resolves spoken self-corrections &mdash; &ldquo;Tuesday, no wait, Wednesday&rdquo;
+        becomes Wednesday &mdash; and drops filler and stutters. Costs one LLM call per dictation.</small>
+
+      <label class="switch" style="margin-top:12px">
         <input type="checkbox" id="review-mode" checked>
         <span>Pause to show what was heard</span>
       </label>
-      <small class="switch-note">On: the instruction is shown for a moment before it runs, so you can
-        <kbd>Esc</kbd> out of a mishear or fix a word. It applies on its own when the bar runs out &mdash;
-        it never sits waiting for you. Typing in the box stops the timer.</small>
+      <small class="switch-note">Applies on its own when the bar runs out. <kbd>Esc</kbd> cancels,
+        <kbd>&crarr;</kbd> applies now, typing holds the timer.</small>
 
       <label class="field" style="margin-top:12px">
         <span>Grace period <b id="grace-val">2.5s</b></span>
@@ -72,11 +76,36 @@
     </section>
 
     <section class="panel">
-      <h2>System prompt</h2>
-      <p class="hint">This is the whole behaviour of the edit pass — change it and re-run to iterate.</p>
-      <textarea id="system-prompt" rows="10" spellcheck="false"></textarea>
-      <div class="btn-row">
-        <button class="btn" id="btn-reset-prompt">Reset to default</button>
+      <h2>OpenRouter</h2>
+      <div id="key-server" class="key-note ok" hidden>
+        Using the key from the backend environment. Nothing is stored in this browser.
+      </div>
+      <label class="field" id="key-field">
+        <span>API key</span>
+        <input type="password" id="api-key" placeholder="sk-or-v1-…" autocomplete="off" spellcheck="false">
+        <small>Kept in this browser's localStorage. To avoid that, put
+          <code>OPENROUTER_API_KEY</code> in <code>.env</code> and restart.</small>
+      </label>
+      <label class="field">
+        <span>Model <b id="model-count"></b></span>
+        <input type="text" id="model-search" placeholder="filter models…" spellcheck="false">
+        <select id="model" size="6"></select>
+        <small id="model-price">—</small>
+      </label>
+      <label class="field">
+        <span>Temperature <b id="temp-val">0.20</b></span>
+        <input type="range" id="temperature" min="0" max="1.5" step="0.05" value="0.2">
+      </label>
+    </section>
+
+    <section class="panel">
+      <h2>Learned vocabulary</h2>
+      <p class="hint">Terms you correct get remembered and fed back as recogniser hints.
+        Promoted after <b id="promote-at">2</b> sightings.</p>
+      <div id="vocab-list" class="vocab"></div>
+      <div class="vocab-add">
+        <input type="text" id="vocab-input" placeholder="add a term…" spellcheck="false">
+        <button class="btn" id="btn-vocab-add">Add</button>
       </div>
     </section>
   </aside>
@@ -114,30 +143,17 @@
       </div>
     </div>
 
-    <div class="actions">
-      <div class="action-card">
-        <div class="action-head">
-          <h3>Dictate</h3>
-          <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>D</kbd>
-        </div>
-        <p>Verbatim speech at the cursor. Replaces the selection if there is one.</p>
-        <button class="btn btn-primary" id="btn-dictate">
-          <span class="rec-dot"></span> Start dictating
-        </button>
-      </div>
-
-      <div class="action-card accent">
-        <div class="action-head">
-          <h3>Voice edit</h3>
-          <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>E</kbd>
-        </div>
-        <p>Say what to change about the selection. Falls back to the whole document if nothing is selected.</p>
-        <button class="btn btn-primary" id="btn-edit">
-          <span class="rec-dot"></span> Speak an instruction
-        </button>
+    <div class="talk">
+      <button class="talk-btn" id="btn-talk">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a3.5 3.5 0 0 0 3.5-3.5v-5a3.5 3.5 0 0 0-7 0v5A3.5 3.5 0 0 0 12 15Z"/><path d="M6 11a6 6 0 0 0 12 0M12 17v4"/></svg>
+        <span class="talk-label" id="talk-label">Hold to dictate</span>
+      </button>
+      <div class="talk-meta">
+        <span id="talk-hint">Hold <kbd>Ctrl</kbd>+<kbd>Space</kbd> to talk · tap it to toggle · say
+          &ldquo;never mind&rdquo; to cancel</span>
+        <span id="talk-target" class="talk-target"></span>
       </div>
     </div>
-
 
     <div class="panel result" id="result" hidden>
       <div class="result-head">
@@ -164,6 +180,12 @@
         <div class="stat"><span class="stat-k">LLM</span><span class="stat-v" id="m-llm">—</span></div>
         <div class="stat"><span class="stat-k">Cost</span><span class="stat-v" id="m-cost">—</span></div>
       </div>
+    </section>
+
+    <section class="panel">
+      <h2>Voice commands</h2>
+      <p class="hint">Handled instantly, without an LLM call.</p>
+      <div id="command-list" class="commands"></div>
     </section>
 
     <section class="panel">

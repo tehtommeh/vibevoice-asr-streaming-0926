@@ -53,44 +53,88 @@ with room to spare — the `backlog` events stay at zero.
 ## Voice editing
 
 `editor.html` is a browser prototype of a desktop dictation workflow, so the
-pipeline and the prompt can be tuned before any of it is wired to global
-hotkeys.
+pipeline, prompts and command vocabulary can be settled before any of it is
+wired to global hotkeys.
 
-- **Dictate** (`Ctrl+Shift+D`) — verbatim speech at the cursor.
-- **Voice edit** (`Ctrl+Shift+E`) — select a passage, say what to change. With
-  nothing selected it edits the whole document.
+**One control.** Hold `Ctrl+Space` (or the button) and talk. What happens
+depends on the selection, which is how you already think about it:
 
-The transcribed instruction and the selected text go to OpenRouter through the
-backend (`POST /api/llm/edit`) — the browser never calls OpenRouter directly, so
-a desktop client can hit the same endpoint later. Set `OPENROUTER_API_KEY` in
-`.env`, or type a key into the page (it goes to `localStorage`; the page says
-which mode it is in).
+| | |
+|---|---|
+| nothing selected | speech is **dictated** at the cursor |
+| text selected | speech is an **instruction about that text** |
 
-**Cancelling.** Speech recognition mishears, so `Esc` means *stop, change
-nothing* at every stage — while recording, while transcribing, during the grace
-period, and while the LLM call is in flight (the request is aborted before any
-text is replaced).
+Hold to talk, release to stop. A tap shorter than 350 ms latches instead, so you
+can toggle for a long dictation rather than holding the key down.
 
-With **Pause to show what was heard** on (the default), the transcribed
-instruction appears under the document for a grace period — 2.5 s by default,
-adjustable — and then applies on its own. It is a window to bail out of, not a
-gate that waits for you: nothing ever stalls waiting for a keypress. During it:
+### Voice commands
+
+Phrases handled locally — no LLM call, no latency, no chance of being
+reinterpreted. `GET /api/commands` serves the list; clients match it themselves,
+because the same word means different things in a browser and on a desktop.
+
+`never mind` · `scratch that` · `undo` · `delete that` · `all caps` ·
+`lowercase that` · `title case` · `new paragraph` …
+
+**Saying "never mind" cancels** — including when it trails a real instruction
+("make it bold, no, scratch that"). `Esc` does the same from the keyboard, at
+every stage: recording, transcribing, during the grace period, and with the LLM
+request in flight.
+
+### Modes
+
+Each mode carries its own edit prompt, dictation prompt, model and temperature:
+**Prose**, **Email**, **Commit message**, **Chat/Slack**, **Code comment**. They
+live on the server (`GET/PUT /api/modes`) rather than in browser storage, so the
+desktop client will inherit whatever you tune here — and will be able to pick a
+mode from the focused application.
+
+Dictating "um this fixes the thing where the parser was crashing on empty input"
+in commit mode yields `Fix parser crashing on empty input`.
+
+### Dictation cleanup
+
+With **Clean up dictation** on, raw speech goes through the mode's dictation
+prompt first. It resolves spoken self-corrections and drops filler, without
+touching your register:
+
+> so um I think we should ship it on Tuesday no wait not Tuesday lets do
+> Wednesday because the the release window is is better
+
+becomes *"I think we should ship it on Wednesday because the release window is
+better."* Turn it off for verbatim dictation.
+
+### Learned vocabulary
+
+When an edit replaces a garbled term with a real one, the term is remembered
+along with what the recogniser heard. After two sightings it is promoted into
+the hotwords sent with every recording, so the mistake stops recurring. Stored
+server-side in `data/store.json`, listed and editable in the left rail.
+
+Fixing "cooper netties" once records `Kubernetes` ← *heard as "cooper netties"*.
+
+### Review before applying
+
+**Pause to show what was heard** (default on) displays the instruction for a
+grace period, then applies on its own — a window to bail out of, not a gate that
+waits for you.
 
 | | |
 |---|---|
 | `Enter` | apply now, from wherever focus is |
 | `Esc` | cancel, no API call made |
-| type in the box | stops the timer, so you can fix a misheard word and press Enter |
+| type in the box | stops the timer, so you can fix a misheard word |
 
-**Retry** undoes the last edit and re-runs the same instruction, which is how you
-compare models or prompt changes. Everything is undoable.
+**Retry** undoes the last edit and re-runs the same instruction, for comparing
+models or prompt changes. Everything is undoable.
 
-The system prompt is an editable textarea in the left rail — it is the entire
-behaviour of the edit pass, so tune it there and re-run.
+### Keys and storage
 
-Words from the document are harvested as ASR hotwords, along with common editing
-verbs, so an instruction naming a term already on screen is more likely to come
-through intact.
+The OpenRouter call is proxied through the backend (`POST /api/llm/edit`) rather
+than made from the browser, so a desktop client can hit the same endpoint with
+the same modes. Set `OPENROUTER_API_KEY` in `.env`, or type a key into the page
+(it goes to `localStorage`; the page says which mode it is in). Modes and
+vocabulary persist in `./data`, which is bind-mounted into the backend.
 
 ---
 

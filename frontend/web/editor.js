@@ -1,10 +1,16 @@
-/* Voice editing: select text, speak an instruction, an LLM rewrites it.
-   A browser stand-in for the eventual desktop hotkeys, so the pipeline and the
-   prompt can be iterated on before any of it touches /dev/uinput. */
+/* Voice editing: one key. Something selected -> speech is an instruction about
+   it. Nothing selected -> speech is dictation at the cursor.
+
+   A browser stand-in for the desktop hotkey, so the pipeline, the prompts and
+   the command vocabulary can be settled before any of it touches /dev/uinput. */
 'use strict';
 
 const $ = (id) => document.getElementById(id);
-const LS = { key: 'vv.openrouter.key', model: 'vv.openrouter.model', prompt: 'vv.system.prompt', review: 'vv.review', grace: 'vv.grace' };
+const LS = {
+  key: 'vv.openrouter.key', model: 'vv.openrouter.model',
+  review: 'vv.review', grace: 'vv.grace', cleanup: 'vv.cleanup',
+};
+const TAP_MS = 350;        // press shorter than this latches instead of push-to-talk
 
 const SAMPLE = `We deployed the new service to cooper netties last Tuesday and it's been running fine since. The main thing that changed is we moved the ingest path off of the old queue and onto red is streams, which cut the tail latency by about a third.
 
@@ -12,13 +18,13 @@ There are still two open questions. First, whether we keep the fallback path aro
 
 const state = {
   busy: false, mode: null, ws: null, audioCtx: null, worklet: null, stream: null,
-  heard: '', models: [], serverKey: false, defaultPrompt: '',
+  heard: '', models: [], serverKey: false,
+  modes: [], activeMode: null, commands: [], vocab: {}, hotwords: [],
   selection: null, undoStack: [], asrMs: null,
   awaitingReview: false, editAbort: null, lastInstruction: null, lastSelection: null,
-  countdownTimer: null,
+  countdownTimer: null, pressAt: 0, latched: false,
 };
 
-/* True whenever Esc has something to cancel. */
 function inFlight() { return state.busy || state.awaitingReview || state.editAbort !== null; }
 
 /* ------------------------------------------------------------------ utils */
@@ -36,38 +42,44 @@ function setStep(name, cls) {
   const li = document.querySelector(`.steps li[data-step="${name}"]`);
   if (li) li.className = cls || '';
 }
-function resetSteps() { ['record','asr','llm','apply'].forEach(s => setStep(s, '')); }
+function resetSteps() { ['record', 'asr', 'llm', 'apply'].forEach(s => setStep(s, '')); }
 
 function escapeHtml(t) {
-  return t.replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+  return t.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 }
 
-/* Word-level LCS diff, enough to show what the model actually touched. */
-function diffWords(before, after) {
+/* Word-level LCS diff. Returns runs so the same pass can render the diff and
+   feed the vocabulary learner. */
+function diffRuns(before, after) {
   const a = before.split(/(\s+)/), b = after.split(/(\s+)/);
   const n = a.length, m = b.length;
-  // Cap the table so a huge paste cannot lock the tab up.
-  if (n * m > 4_000_000) {
-    return `<del>${escapeHtml(before)}</del> <ins>${escapeHtml(after)}</ins>`;
-  }
+  if (n * m > 4000000) return [{ type: 'del', text: before }, { type: 'ins', text: after }];
+
   const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
   for (let i = n - 1; i >= 0; i--)
     for (let j = m - 1; j >= 0; j--)
       dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
 
-  let out = '', i = 0, j = 0;
-  const flush = (tag, buf) => buf ? `<${tag}>${escapeHtml(buf)}</${tag}>` : '';
-  let delBuf = '', insBuf = '';
+  const runs = [];
+  const push = (type, text) => {
+    if (!text) return;
+    const last = runs[runs.length - 1];
+    if (last && last.type === type) last.text += text; else runs.push({ type, text });
+  };
+  let i = 0, j = 0;
   while (i < n && j < m) {
-    if (a[i] === b[j]) {
-      out += flush('del', delBuf) + flush('ins', insBuf); delBuf = insBuf = '';
-      out += escapeHtml(a[i]); i++; j++;
-    } else if (dp[i + 1][j] >= dp[i][j + 1]) { delBuf += a[i++]; }
-    else { insBuf += b[j++]; }
+    if (a[i] === b[j]) { push('same', a[i]); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) push('del', a[i++]);
+    else push('ins', b[j++]);
   }
-  while (i < n) delBuf += a[i++];
-  while (j < m) insBuf += b[j++];
-  return out + flush('del', delBuf) + flush('ins', insBuf);
+  while (i < n) push('del', a[i++]);
+  while (j < m) push('ins', b[j++]);
+  return runs;
+}
+
+function renderDiff(runs) {
+  return runs.map(r => r.type === 'same' ? escapeHtml(r.text)
+    : `<${r.type === 'del' ? 'del' : 'ins'}>${escapeHtml(r.text)}</${r.type === 'del' ? 'del' : 'ins'}>`).join('');
 }
 
 /* ----------------------------------------------------- instruction panel */
@@ -81,15 +93,10 @@ function showInstruction(label, { editable = false, hint = '<kbd>Esc</kbd> cance
   box.classList.toggle('editable', editable);
   $('instruction-actions').hidden = !editable;
   if (editable) {
-    // Focus after a frame: resetControls() rewrites the buttons just before
-    // this runs, which drops focus to <body> if we grab it too early.
-    requestAnimationFrame(() => {
-      box.focus();
-      box.setSelectionRange(box.value.length, box.value.length);
-    });
+    // Focus next frame: the control labels are rewritten just before this, which
+    // drops focus to <body> if we grab it too early.
+    requestAnimationFrame(() => { box.focus(); box.setSelectionRange(box.value.length, box.value.length); });
   }
-  // The panel is useless if it is under the fold, which is exactly where it
-  // landed on a short viewport.
   $('instruction').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 
@@ -101,16 +108,15 @@ function hideInstruction() {
   state.awaitingReview = false;
 }
 
-/* The grace period. It always resolves on its own -- the flow must never sit
-   waiting for a keypress the user may not have noticed was needed. */
+/* The grace period always resolves on its own -- a step that waits forever for
+   a keypress reads as a hang. */
 function startCountdown(onElapsed) {
   stopCountdown();
   const ms = Math.round(parseFloat($('grace').value) * 1000);
-  const bar = $('countdown'), fill = $('countdown-fill');
-  bar.hidden = false;
+  const fill = $('countdown-fill');
+  $('countdown').hidden = false;
   fill.style.transition = 'none';
   fill.style.width = '100%';
-  // Force a reflow so the transition starts from 100%.
   void fill.offsetWidth;
   fill.style.transition = `width ${ms}ms linear`;
   fill.style.width = '0%';
@@ -125,7 +131,6 @@ function stopCountdown() {
   $('countdown').hidden = true;
 }
 
-/* One key, one meaning: stop whatever is happening and change nothing. */
 function cancelAll(reason) {
   const wasDoing = inFlight();
   stopCountdown();
@@ -143,21 +148,28 @@ function currentSelection() {
   const doc = $('doc');
   const start = doc.selectionStart, end = doc.selectionEnd;
   if (start !== end) return { start, end, text: doc.value.slice(start, end), whole: false };
-  return { start: 0, end: doc.value.length, text: doc.value, whole: true };
+  return { start, end, text: '', whole: true, caret: start };
 }
 
 function refreshSelectionInfo() {
   const doc = $('doc');
   const chars = doc.selectionEnd - doc.selectionStart;
   const chip = $('sel-info');
-  if (chars > 0) {
+  const hasSel = chars > 0;
+  if (hasSel) {
     const words = doc.value.slice(doc.selectionStart, doc.selectionEnd).trim().split(/\s+/).filter(Boolean).length;
     chip.textContent = `${chars} chars · ${words} words selected`;
     chip.className = 'chip chip-accent';
   } else {
-    chip.textContent = doc.value.trim() ? 'nothing selected — edits apply to the whole document' : 'nothing selected';
+    chip.textContent = 'nothing selected';
     chip.className = 'chip';
   }
+  if (!state.busy) {
+    $('talk-label').textContent = hasSel ? 'Hold to edit selection' : 'Hold to dictate';
+    $('talk-target').textContent = hasSel ? 'speech = an instruction about the selection'
+                                          : 'speech = text at the cursor';
+  }
+  $('btn-talk').classList.toggle('is-edit', hasSel);
 }
 
 function replaceRange(start, end, text) {
@@ -169,14 +181,84 @@ function replaceRange(start, end, text) {
   refreshSelectionInfo();
 }
 
+/* --------------------------------------------------------- voice commands */
+
+function normalise(text) {
+  return text.toLowerCase().replace(/[.,!?;:'"]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+/* Returns an action when the whole utterance is a command, or when it trails
+   off into a cancellation ("make it bold, no, never mind"). */
+function matchCommand(text) {
+  const norm = normalise(text);
+  if (!norm) return null;
+  for (const cmd of state.commands) {
+    for (const phrase of cmd.phrases) {
+      if (norm === normalise(phrase)) return { action: cmd.action, phrase, whole: true };
+    }
+  }
+  const cancel = state.commands.find(c => c.action === 'cancel');
+  if (cancel) {
+    for (const phrase of cancel.phrases) {
+      const p = normalise(phrase);
+      if (norm.endsWith(' ' + p) || norm === p) return { action: 'cancel', phrase, whole: false };
+    }
+  }
+  return null;
+}
+
+const TRANSFORMS = {
+  uppercase: (t) => t.toUpperCase(),
+  lowercase: (t) => t.toLowerCase(),
+  titlecase: (t) => t.replace(/\w\S*/g, w => w[0].toUpperCase() + w.slice(1).toLowerCase()),
+  sentencecase: (t) => t.charAt(0).toUpperCase() + t.slice(1).toLowerCase(),
+  trim: (t) => t.replace(/\s+/g, ' ').trim(),
+};
+
+/* Run a command locally. Returns true if it was handled. */
+function runCommand(action, sel) {
+  const doc = $('doc');
+  if (action === 'cancel') { cancelAll('Cancelled — nothing changed.'); return true; }
+  if (action === 'undo') {
+    if ($('btn-undo').disabled) { toast('Nothing to undo.'); } else { $('btn-undo').click(); toast('Undone.'); }
+    return true;
+  }
+  if (action === 'newline' || action === 'paragraph') {
+    const text = action === 'paragraph' ? '\n\n' : '\n';
+    replaceRange(sel.start, sel.end, text);
+    addHistory(action === 'paragraph' ? 'new paragraph' : 'new line', '', 'local · 0 ms');
+    return true;
+  }
+  if (!sel.text) { toast('Select some text for that one.', true); return true; }
+  if (action === 'delete') {
+    replaceRange(sel.start, sel.end, '');
+    addHistory('delete that', '', 'local · 0 ms');
+    return true;
+  }
+  const fn = TRANSFORMS[action];
+  if (fn) {
+    const after = fn(sel.text);
+    replaceRange(sel.start, sel.end, after);
+    showResult(sel.text, after, { local: true, label: action });
+    addHistory(action, after, 'local · 0 ms');
+    return true;
+  }
+  return false;
+}
+
 /* --------------------------------------------------------------- recording */
 
-async function startRecording(mode) {
+function talkTargetIsEdit() {
+  const doc = $('doc');
+  return doc.selectionEnd > doc.selectionStart;
+}
+
+async function startRecording() {
   if (state.busy) return;
-  state.mode = mode;
-  state.heard = '';
   state.selection = currentSelection();
-  showInstruction(mode === 'dictate' ? 'dictating…' : 'listening…');
+  state.mode = talkTargetIsEdit() ? 'edit' : 'dictate';
+  state.heard = '';
+  showInstruction(state.mode === 'dictate' ? 'dictating…' : 'listening…');
   $('instruction-text').value = '';
   resetSteps();
   setStep('record', 'active');
@@ -193,20 +275,19 @@ async function startRecording(mode) {
       NotReadableError: 'The microphone is in use by another application.',
     }[err.name];
     toast(why || `Microphone unavailable (${err.name}).`, true);
-    resetSteps(); hideInstruction();
+    resetSteps(); hideInstruction(); resetControls();
     return;
   }
   state.stream = stream;
-
   try {
-    await openSocket(mode);
+    await openSocket();
   } catch (err) {
     stopRecording(false);
     toast(err.message || 'Could not start the live connection.', true);
   }
 }
 
-async function openSocket(mode) {
+async function openSocket() {
   const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/ws/live`);
   ws.binaryType = 'arraybuffer';
   state.ws = ws;
@@ -230,17 +311,11 @@ async function openSocket(mode) {
     ws.onopen = resolve;
     setTimeout(() => reject(new Error('the backend did not accept the live connection')), 8000);
   });
-
-  // Dictation is verbatim; an instruction benefits from biasing toward the
-  // words already on screen, which are exactly what it will talk about.
-  const context = mode === 'edit' ? hotwordsFromDocument() : null;
-  ws.send(JSON.stringify({ context_info: context, temperature: 0, max_new_tokens: 256 }));
+  ws.send(JSON.stringify({ context_info: asrHints(), temperature: 0, max_new_tokens: 256 }));
 
   state.busy = true;
-  const btn = mode === 'dictate' ? $('btn-dictate') : $('btn-edit');
-  btn.classList.add('is-recording');
-  btn.innerHTML = '<span class="rec-dot"></span> Stop';
-  (mode === 'dictate' ? $('btn-edit') : $('btn-dictate')).disabled = true;
+  $('btn-talk').classList.add('is-recording');
+  $('talk-label').textContent = state.latched ? 'Recording — tap to stop' : 'Listening… release to stop';
 
   const ctx = new AudioContext({ sampleRate: 24000 });
   state.audioCtx = ctx;
@@ -255,33 +330,32 @@ async function openSocket(mode) {
   source.connect(node); node.connect(mute).connect(ctx.destination);
 }
 
-/* Feed distinctive words from the document in as ASR hotwords, so an
-   instruction that names a term already on screen gets it right. */
-// Words an editing instruction is likely to contain. Biasing toward these
-// costs nothing and cuts down the mishears that make you cancel in the first place.
+// Words an editing instruction is likely to contain, plus terms already on
+// screen and everything the user has taught us.
 const EDIT_VOCAB = [
   'rewrite', 'rephrase', 'replace', 'delete', 'shorten', 'expand', 'summarise',
   'bullet points', 'paragraph', 'sentence', 'formal', 'casual', 'concise',
   'past tense', 'present tense', 'capitalise', 'lowercase', 'spelling',
-  'punctuation', 'heading', 'numbered list', 'instead of', 'change', 'fix',
+  'punctuation', 'heading', 'numbered list', 'instead of', 'never mind',
+  'scratch that', 'undo', 'change', 'fix',
 ];
 
-function hotwordsFromDocument() {
-  // Anything capitalised, hyphenated, numbered or snake_cased: proper nouns and
-  // identifiers are what the ASR mangles. Ordinary sentence-initial words slip
-  // through and are harmless -- they are already high-probability tokens.
+function asrHints() {
   const words = ($('doc').value.match(/\b[A-Za-z][A-Za-z0-9_.-]{3,}\b/g) || [])
     .filter(w => /[A-Z]/.test(w) || /[0-9_.-]/.test(w));
-  return [...new Set([...words.slice(0, 24), ...EDIT_VOCAB])].join(', ') || null;
+  const all = [...new Set([...state.hotwords, ...words.slice(0, 24), ...EDIT_VOCAB])];
+  return all.join(', ') || null;
 }
 
 function stopRecording(flush = true) {
   if (state.worklet) { try { state.worklet.port.onmessage = null; state.worklet.disconnect(); } catch (_) {} state.worklet = null; }
   if (state.stream) { state.stream.getTracks().forEach(t => t.stop()); state.stream = null; }
   if (state.audioCtx) { state.audioCtx.close().catch(() => {}); state.audioCtx = null; }
+  state.latched = false;
 
   if (flush && state.ws && state.ws.readyState === WebSocket.OPEN) {
     setStep('record', 'done'); setStep('asr', 'active');
+    $('talk-label').textContent = 'Transcribing…';
     state.ws.send('end');
   } else {
     if (state.ws) { try { state.ws.close(); } catch (_) {} state.ws = null; }
@@ -292,41 +366,38 @@ function stopRecording(flush = true) {
 
 function resetControls() {
   state.busy = false;
-  $('btn-dictate').disabled = false; $('btn-edit').disabled = false;
-  $('btn-dictate').classList.remove('is-recording');
-  $('btn-edit').classList.remove('is-recording');
-  $('btn-dictate').innerHTML = '<span class="rec-dot"></span> Start dictating';
-  $('btn-edit').innerHTML = '<span class="rec-dot"></span> Speak an instruction';
+  state.latched = false;
+  $('btn-talk').classList.remove('is-recording');
+  refreshSelectionInfo();
 }
 
 async function finishRecording(ev) {
   if (state.ws) { try { state.ws.close(); } catch (_) {} state.ws = null; }
-  // `plain` has no speaker labels -- this is one person talking, and a
-  // "Speaker 0:" prefix would land in the document or the LLM instruction.
+  // `plain` has no speaker labels -- one person talking, and "Speaker 0:"
+  // would land in the document or the instruction.
   const heard = (ev.plain || state.heard || '').trim();
   setStep('record', 'done'); setStep('asr', 'done');
   $('m-asr').textContent = state.asrMs != null ? state.asrMs + ' ms' : '—';
 
   if (!heard) { toast('Nothing was transcribed.', true); resetControls(); resetSteps(); hideInstruction(); return; }
 
-  if (state.mode === 'dictate') {
-    const sel = state.selection;
-    // Dictation goes in at the cursor; a live selection is overwritten.
-    const doc = $('doc');
-    const start = sel.whole ? doc.selectionStart : sel.start;
-    const end = sel.whole ? doc.selectionEnd : sel.end;
-    replaceRange(start, end, heard);
-    setStep('apply', 'done');
+  // Spoken commands short-circuit the whole pipeline: no API call, no latency.
+  const command = matchCommand(heard);
+  if (command) {
     resetControls();
     hideInstruction();
-    addHistory('Dictated', heard, `${state.asrMs ?? '?'} ms`);
-    return;
+    if (command.action === 'cancel') {
+      resetSteps();
+      toast(`“${command.phrase}” — cancelled, nothing changed.`);
+      return;
+    }
+    if (runCommand(command.action, state.selection)) { setStep('apply', 'done'); return; }
   }
+
+  if (state.mode === 'dictate') return finishDictation(heard);
 
   $('instruction-text').value = heard;
   if ($('review-mode').checked) {
-    // Show it briefly so a mis-heard instruction can be killed or corrected,
-    // then apply on its own. A gate that waits forever reads as a hang.
     state.awaitingReview = true;
     resetControls();
     showInstruction('heard — applying shortly', {
@@ -342,11 +413,66 @@ async function finishRecording(ev) {
   await runEdit(heard);
 }
 
+async function finishDictation(heard) {
+  const sel = state.selection;
+  let text = heard;
+  if ($('cleanup-dictation').checked) {
+    setStep('llm', 'active');
+    showInstruction('cleaning up…', { hint: '<kbd>Esc</kbd> cancels' });
+    const cleaned = await callLLM({ text: heard, instruction: '', task: 'dictate' });
+    if (cleaned === null) return;                 // cancelled or failed
+    text = cleaned.result || heard;
+    $('m-llm').textContent = Math.round(cleaned.elapsed_ms) + ' ms';
+    $('m-cost').textContent = formatCost(cleaned);
+    setStep('llm', 'done');
+    if (text !== heard) showResult(heard, text, { label: 'dictation cleanup' });
+  }
+  replaceRange(sel.start, sel.end, text);
+  setStep('apply', 'done');
+  resetControls();
+  hideInstruction();
+  addHistory('Dictated', text, `${state.asrMs ?? '?'} ms`);
+}
+
 /* --------------------------------------------------------------- the edit */
+
+async function callLLM({ text, instruction, task = 'edit' }) {
+  const body = {
+    text, instruction, task,
+    mode: state.activeMode,
+    model: $('model').value || undefined,
+    temperature: parseFloat($('temperature').value),
+  };
+  if (task === 'edit') body.system_prompt = $('system-prompt').value;
+  else body.system_prompt = $('dictation-prompt').value;
+  const key = $('api-key').value.trim();
+  if (key) body.api_key = key;
+
+  const controller = new AbortController();
+  state.editAbort = controller;
+  try {
+    const res = await fetch('/api/llm/edit', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body), signal: controller.signal,
+    });
+    const payload = await res.json();
+    if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`);
+    return payload;
+  } catch (err) {
+    setStep('llm', '');
+    if (err.name !== 'AbortError') toast(err.message, true);
+    resetControls();
+    hideInstruction();
+    return null;
+  } finally {
+    state.editAbort = null;
+  }
+}
 
 async function runEdit(instruction) {
   const sel = state.selection;
-  if (!sel.text.trim()) { toast('There is no text to edit.', true); resetControls(); resetSteps(); return; }
+  const target = sel.text || $('doc').value;
+  if (!target.trim()) { toast('There is no text to edit.', true); resetControls(); resetSteps(); hideInstruction(); return; }
 
   state.awaitingReview = false;
   stopCountdown();
@@ -355,49 +481,53 @@ async function runEdit(instruction) {
   showInstruction('editing…', { hint: '<kbd>Esc</kbd> cancels before anything is replaced' });
   $('instruction-text').value = instruction;
   setStep('llm', 'active');
-  const body = {
-    text: sel.text,
-    instruction,
-    model: $('model').value || undefined,
-    system_prompt: $('system-prompt').value,
-    temperature: parseFloat($('temperature').value),
-  };
-  const key = $('api-key').value.trim();
-  if (key) body.api_key = key;
 
-  const controller = new AbortController();
-  state.editAbort = controller;
-  try {
-    const res = await fetch('/api/llm/edit', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    const payload = await res.json();
-    if (!res.ok) throw new Error(payload.detail || `HTTP ${res.status}`);
+  const range = sel.text ? [sel.start, sel.end] : [0, $('doc').value.length];
+  const payload = await callLLM({ text: target, instruction });
+  if (payload === null) return;
 
-    setStep('llm', 'done'); setStep('apply', 'active');
-    const before = sel.text;
-    const after = payload.result;
-    replaceRange(sel.start, sel.start + before.length, after);
-    setStep('apply', 'done');
+  setStep('llm', 'done'); setStep('apply', 'active');
+  const after = payload.result;
+  replaceRange(range[0], range[1], after);
+  setStep('apply', 'done');
 
-    $('m-llm').textContent = Math.round(payload.elapsed_ms) + ' ms';
-    $('m-cost').textContent = formatCost(payload);
-    $('result').hidden = false;
-    $('result-meta').textContent = `${payload.model} · ${payload.usage.total_tokens ?? '?'} tokens`;
-    $('diff').innerHTML = diffWords(before, after);
-    addHistory(instruction, after, `${Math.round(payload.elapsed_ms)} ms`);
-  } catch (err) {
-    setStep('llm', '');
-    // An abort is a deliberate cancel, not a failure -- cancelAll already said so.
-    if (err.name !== 'AbortError') toast(err.message, true);
-  } finally {
-    state.editAbort = null;
-    resetControls();
-    if (!state.awaitingReview) hideInstruction();
+  $('m-llm').textContent = Math.round(payload.elapsed_ms) + ' ms';
+  $('m-cost').textContent = formatCost(payload);
+  const runs = showResult(target, after, { meta: `${payload.model} · ${payload.usage.total_tokens ?? '?'} tokens` });
+  learnFromDiff(runs, instruction);
+  addHistory(instruction, after, `${Math.round(payload.elapsed_ms)} ms`);
+  resetControls();
+  hideInstruction();
+}
+
+function showResult(before, after, { meta = '', local = false, label = '' } = {}) {
+  const runs = diffRuns(before, after);
+  $('result').hidden = false;
+  $('result-meta').textContent = meta || (local ? `local command · ${label}` : label);
+  $('diff').innerHTML = renderDiff(runs);
+  return runs;
+}
+
+/* Terms the model introduced that the recogniser got wrong are exactly the
+   words worth biasing toward next time. */
+function learnFromDiff(runs, instruction) {
+  const learned = [];
+  for (let i = 0; i < runs.length; i++) {
+    if (runs[i].type !== 'ins') continue;
+    const removed = (i > 0 && runs[i - 1].type === 'del') ? runs[i - 1].text.trim() : '';
+    for (const word of runs[i].text.match(/\b[A-Za-z][A-Za-z0-9_.-]{2,}\b/g) || []) {
+      if (!/[A-Z]/.test(word) && !/[0-9_.-]/.test(word)) continue;   // ordinary word
+      if (new RegExp(`\\b${word}\\b`, 'i').test(instruction) || removed) {
+        learned.push({ term: word, heard: removed.slice(0, 80) || undefined });
+      }
+    }
   }
+  if (!learned.length) return;
+  fetch('/api/vocab', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ terms: learned.slice(0, 8) }),
+  }).then(r => r.json()).then(d => { state.vocab = d.vocab; state.hotwords = d.hotwords; renderVocab(); })
+    .catch(() => {});
 }
 
 function formatCost(payload) {
@@ -407,8 +537,7 @@ function formatCost(payload) {
   if (!model || model.prompt_price == null || usage.prompt_tokens == null) return '—';
   const cost = usage.prompt_tokens * model.prompt_price +
                (usage.completion_tokens || 0) * (model.completion_price || 0);
-  if (cost < 0.01) return '<$0.01';
-  return '$' + cost.toFixed(3);
+  return cost < 0.01 ? '<$0.01' : '$' + cost.toFixed(3);
 }
 
 function addHistory(label, text, timing) {
@@ -416,36 +545,115 @@ function addHistory(label, text, timing) {
   if (box.querySelector('.hint')) box.innerHTML = '';
   const item = document.createElement('div');
   item.className = 'history-item';
-  item.innerHTML = `<b>${escapeHtml(label.slice(0, 90))}</b><span>${escapeHtml(text.slice(0, 140))}</span><em>${timing}</em>`;
+  item.innerHTML = `<b>${escapeHtml(String(label).slice(0, 90))}</b>` +
+                   (text ? `<span>${escapeHtml(text.slice(0, 140))}</span>` : '') +
+                   `<em>${timing}</em>`;
   box.prepend(item);
 }
 
-/* ------------------------------------------------------------------ setup */
+/* ------------------------------------------------------- modes and vocab */
+
+function applyMode(id) {
+  const mode = state.modes.find(m => m.id === id) || state.modes[0];
+  if (!mode) return;
+  state.activeMode = mode.id;
+  $('mode').value = mode.id;
+  $('system-prompt').value = mode.system_prompt || '';
+  $('dictation-prompt').value = mode.dictation_prompt || '';
+  $('temperature').value = mode.temperature ?? 0.2;
+  $('temp-val').textContent = parseFloat($('temperature').value).toFixed(2);
+  if (mode.model) { $('model').value = mode.model; showPrice(); }
+  fetch('/api/modes/active', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: mode.id }),
+  }).catch(() => {});
+}
+
+async function loadModes() {
+  try {
+    const d = await (await fetch('/api/modes')).json();
+    state.modes = d.modes;
+    $('mode').innerHTML = d.modes.map(m => `<option value="${m.id}">${escapeHtml(m.name)}</option>`).join('');
+    applyMode(d.active);
+  } catch (_) { /* health poll reports the outage */ }
+}
+
+async function saveMode() {
+  const mode = state.modes.find(m => m.id === state.activeMode);
+  if (!mode) return;
+  mode.system_prompt = $('system-prompt').value;
+  mode.dictation_prompt = $('dictation-prompt').value;
+  mode.temperature = parseFloat($('temperature').value);
+  mode.model = $('model').value || '';
+  try {
+    const res = await fetch('/api/modes', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ modes: state.modes, active: state.activeMode }),
+    });
+    if (!res.ok) throw new Error('save failed');
+    toast(`Saved “${mode.name}”.`);
+  } catch (err) { toast(err.message, true); }
+}
+
+async function loadVocab() {
+  try {
+    const d = await (await fetch('/api/vocab')).json();
+    state.vocab = d.vocab; state.hotwords = d.hotwords;
+    $('promote-at').textContent = d.promote_at;
+    renderVocab();
+  } catch (_) {}
+}
+
+function renderVocab() {
+  const box = $('vocab-list');
+  const entries = Object.entries(state.vocab).sort((a, b) => b[1].count - a[1].count);
+  if (!entries.length) { box.innerHTML = '<p class="hint">Nothing learned yet.</p>'; return; }
+  box.innerHTML = '';
+  for (const [term, info] of entries) {
+    const row = document.createElement('div');
+    row.className = 'vocab-item' + (state.hotwords.includes(term) ? ' promoted' : '');
+    row.innerHTML = `<b>${escapeHtml(term)}</b>` +
+      (info.heard && info.heard.length ? `<span>heard as “${escapeHtml(info.heard[0])}”</span>` : '') +
+      `<em>×${info.count}</em>`;
+    const del = document.createElement('button');
+    del.className = 'vocab-del'; del.textContent = '×'; del.title = 'Forget this term';
+    del.addEventListener('click', async () => {
+      const d = await (await fetch('/api/vocab/' + encodeURIComponent(term), { method: 'DELETE' })).json();
+      state.vocab = d.vocab; state.hotwords = d.hotwords; renderVocab();
+    });
+    row.appendChild(del);
+    box.appendChild(row);
+  }
+}
+
+async function loadCommands() {
+  try {
+    state.commands = await (await fetch('/api/commands')).json();
+    $('command-list').innerHTML = state.commands
+      .map(c => `<div class="cmd"><b>${escapeHtml(c.phrases[0])}</b><span>${escapeHtml(c.action)}</span></div>`)
+      .join('');
+  } catch (_) { state.commands = []; }
+}
+
+/* -------------------------------------------------------- models / health */
 
 async function loadStatus() {
   try {
     const s = await (await fetch('/api/llm/status')).json();
     state.serverKey = s.server_key;
-    state.defaultPrompt = s.default_system_prompt;
     $('key-server').hidden = !s.server_key;
     $('key-field').hidden = s.server_key;
-    if (!$('system-prompt').value) $('system-prompt').value = localStorage.getItem(LS.prompt) || s.default_system_prompt;
-  } catch (_) { /* health poll reports the outage */ }
+  } catch (_) {}
 }
 
 async function loadModels() {
-  try {
-    const models = await (await fetch('/api/llm/models')).json();
-    state.models = models;
-    renderModels();
-  } catch (err) {
-    $('model-count').textContent = 'unavailable';
-  }
+  try { state.models = await (await fetch('/api/llm/models')).json(); renderModels(); }
+  catch (_) { $('model-count').textContent = 'unavailable'; }
 }
 
 function renderModels() {
   const filter = $('model-search').value.trim().toLowerCase();
-  const wanted = localStorage.getItem(LS.model) || 'anthropic/claude-haiku-4.5';
+  const wanted = $('model').value || localStorage.getItem(LS.model) || 'anthropic/claude-haiku-4.5';
   const list = state.models.filter(m => !filter || m.id.toLowerCase().includes(filter) || (m.name || '').toLowerCase().includes(filter));
   const select = $('model');
   select.innerHTML = '';
@@ -465,7 +673,8 @@ function showPrice() {
   const m = state.models.find(x => x.id === $('model').value);
   if (!m) { $('model-price').textContent = '—'; return; }
   const per = (p) => p == null ? '?' : '$' + (p * 1e6).toFixed(2);
-  $('model-price').textContent = `${per(m.prompt_price)} in / ${per(m.completion_price)} out per 1M tokens · ${(m.context_length || 0).toLocaleString()} ctx`;
+  $('model-price').textContent =
+    `${per(m.prompt_price)} in / ${per(m.completion_price)} out per 1M · ${(m.context_length || 0).toLocaleString()} ctx`;
 }
 
 async function pollHealth() {
@@ -481,9 +690,33 @@ async function pollHealth() {
   }
   return false;
 }
-
 function scheduleHealth(delay) {
   setTimeout(async () => scheduleHealth(await pollHealth() ? 15000 : 3000), delay);
+}
+
+/* --------------------------------------------------- press-to-talk wiring */
+
+function pressStart() {
+  if (inFlight()) return;
+  state.pressAt = Date.now();
+  state.latched = false;
+  startRecording();
+}
+
+function pressEnd() {
+  if (!state.busy) return;
+  if (Date.now() - state.pressAt < TAP_MS) {
+    // Too short to be a deliberate hold: latch on, stop on the next press.
+    state.latched = true;
+    $('talk-label').textContent = 'Recording — tap to stop';
+    return;
+  }
+  stopRecording(true);
+}
+
+function talkPressed() {
+  if (state.latched && state.busy) { stopRecording(true); return true; }
+  return false;
 }
 
 function init() {
@@ -491,25 +724,31 @@ function init() {
 
   const savedKey = localStorage.getItem(LS.key);
   if (savedKey) $('api-key').value = savedKey;
-  $('api-key').addEventListener('change', (e) => localStorage.setItem(LS.key, e.target.value.trim()));
+  $('api-key').addEventListener('change', e => localStorage.setItem(LS.key, e.target.value.trim()));
 
   $('model-search').addEventListener('input', renderModels);
   $('model').addEventListener('change', () => { localStorage.setItem(LS.model, $('model').value); showPrice(); });
-  $('temperature').addEventListener('input', (e) => { $('temp-val').textContent = parseFloat(e.target.value).toFixed(2); });
-  $('system-prompt').addEventListener('change', (e) => localStorage.setItem(LS.prompt, e.target.value));
-  $('btn-reset-prompt').addEventListener('click', () => {
-    $('system-prompt').value = state.defaultPrompt;
-    localStorage.removeItem(LS.prompt);
-    toast('System prompt reset.');
+  $('temperature').addEventListener('input', e => { $('temp-val').textContent = parseFloat(e.target.value).toFixed(2); });
+  $('mode').addEventListener('change', e => applyMode(e.target.value));
+  $('btn-save-mode').addEventListener('click', saveMode);
+  $('btn-reset-modes').addEventListener('click', async () => {
+    if (!confirm('Reset every mode to its shipped prompts? Learned vocabulary is kept.')) return;
+    try {
+      const res = await fetch('/api/modes/reset', { method: 'POST' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await loadModes();
+      toast('Modes reset to defaults.');
+    } catch (err) { toast(err.message, true); }
   });
 
   ['select', 'keyup', 'mouseup', 'input', 'focus'].forEach(ev =>
     $('doc').addEventListener(ev, refreshSelectionInfo));
   refreshSelectionInfo();
 
-  const toggle = (mode) => () => (state.busy && state.mode === mode) ? stopRecording(true) : startRecording(mode);
-  $('btn-dictate').addEventListener('click', toggle('dictate'));
-  $('btn-edit').addEventListener('click', toggle('edit'));
+  const talk = $('btn-talk');
+  talk.addEventListener('mousedown', (e) => { e.preventDefault(); if (!talkPressed()) pressStart(); });
+  talk.addEventListener('mouseup', pressEnd);
+  talk.addEventListener('mouseleave', () => { if (state.busy && !state.latched) pressEnd(); });
 
   const applyReviewed = () => {
     const instruction = $('instruction-text').value.trim();
@@ -519,14 +758,10 @@ function init() {
   $('btn-apply').addEventListener('click', applyReviewed);
   $('btn-discard').addEventListener('click', () => cancelAll('Discarded — nothing changed.'));
   $('btn-rerecord').addEventListener('click', () => {
-    // Keep the same target text; just take the instruction again.
     const sel = state.selection;
     hideInstruction();
-    startRecording('edit').then(() => { if (sel) state.selection = sel; });
+    startRecording().then(() => { if (sel) state.selection = sel; });
   });
-
-  // Touching the instruction means you are fixing it -- stop the clock and wait
-  // for an explicit Enter rather than firing a half-typed correction.
   $('instruction-text').addEventListener('input', () => {
     if (state.countdownTimer) {
       stopCountdown();
@@ -537,44 +772,36 @@ function init() {
 
   $('btn-retry').addEventListener('click', () => {
     if (!state.lastInstruction || !state.lastSelection) return;
-    $('btn-undo').click();                       // put the original text back
+    $('btn-undo').click();
     state.selection = state.lastSelection;
     runEdit(state.lastInstruction);
   });
 
-  $('review-mode').addEventListener('change', (e) =>
-    localStorage.setItem(LS.review, e.target.checked ? '1' : '0'));
-  const savedReview = localStorage.getItem(LS.review);
-  if (savedReview !== null) $('review-mode').checked = savedReview === '1';
-
-  const showGrace = () => { $('grace-val').textContent = parseFloat($('grace').value).toFixed(1) + 's'; };
-  $('grace').addEventListener('input', () => {
-    showGrace();
-    localStorage.setItem(LS.grace, $('grace').value);
+  $('btn-vocab-add').addEventListener('click', async () => {
+    const term = $('vocab-input').value.trim();
+    if (!term) return;
+    for (let i = 0; i < 2; i++) {                      // straight to promoted
+      await fetch('/api/vocab', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ term }) });
+    }
+    $('vocab-input').value = '';
+    loadVocab();
   });
-  const savedGrace = localStorage.getItem(LS.grace);
-  if (savedGrace !== null) $('grace').value = savedGrace;
-  showGrace();
+  $('vocab-input').addEventListener('keydown', e => { if (e.key === 'Enter') $('btn-vocab-add').click(); });
 
-  // In-page stand-ins for the eventual global hotkeys.
   window.addEventListener('keydown', (e) => {
-    // Esc means the same thing at every stage: stop, change nothing.
-    if (e.key === 'Escape' && inFlight()) {
-      e.preventDefault();
-      cancelAll();
-      return;
-    }
-    // Enter applies wherever focus happens to be -- requiring the textarea to
-    // hold focus made this look like a hang when it did not.
+    if (e.key === 'Escape' && inFlight()) { e.preventDefault(); cancelAll(); return; }
     if (e.key === 'Enter' && !e.shiftKey && state.awaitingReview && e.target.id !== 'doc') {
-      e.preventDefault();
-      applyReviewed();
-      return;
+      e.preventDefault(); applyReviewed(); return;
     }
-    if (!e.ctrlKey || !e.shiftKey) return;
-    const k = e.key.toLowerCase();
-    if (k === 'd') { e.preventDefault(); toggle('dictate')(); }
-    if (k === 'e') { e.preventDefault(); toggle('edit')(); }
+    if (e.ctrlKey && e.code === 'Space') {
+      e.preventDefault();
+      if (e.repeat) return;                            // auto-repeat is not a new press
+      if (!talkPressed()) pressStart();
+    }
+  });
+  window.addEventListener('keyup', (e) => {
+    if (e.code === 'Space' || e.key === 'Control') { if (state.busy) pressEnd(); }
   });
 
   $('btn-undo').addEventListener('click', () => {
@@ -597,8 +824,21 @@ function init() {
     $('doc').value = ''; refreshSelectionInfo();
   });
 
-  loadStatus();
-  loadModels();
+  const savedReview = localStorage.getItem(LS.review);
+  if (savedReview !== null) $('review-mode').checked = savedReview === '1';
+  $('review-mode').addEventListener('change', e => localStorage.setItem(LS.review, e.target.checked ? '1' : '0'));
+
+  const savedCleanup = localStorage.getItem(LS.cleanup);
+  if (savedCleanup !== null) $('cleanup-dictation').checked = savedCleanup === '1';
+  $('cleanup-dictation').addEventListener('change', e => localStorage.setItem(LS.cleanup, e.target.checked ? '1' : '0'));
+
+  const showGrace = () => { $('grace-val').textContent = parseFloat($('grace').value).toFixed(1) + 's'; };
+  $('grace').addEventListener('input', () => { showGrace(); localStorage.setItem(LS.grace, $('grace').value); });
+  const savedGrace = localStorage.getItem(LS.grace);
+  if (savedGrace !== null) $('grace').value = savedGrace;
+  showGrace();
+
+  loadStatus(); loadModels(); loadModes(); loadVocab(); loadCommands();
   scheduleHealth(0);
 }
 

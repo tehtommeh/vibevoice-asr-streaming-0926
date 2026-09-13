@@ -24,6 +24,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from . import audio as audio_utils
 from . import llm
+from . import store
 from .engine import DecodeOptions, VibeVoiceEngine
 
 logging.basicConfig(
@@ -202,20 +203,94 @@ async def llm_models(refresh: bool = False) -> JSONResponse:
     return JSONResponse(models)
 
 
+@app.get("/api/modes")
+async def get_modes() -> JSONResponse:
+    state = store.read_state()
+    return JSONResponse({"modes": state["modes"], "active": state.get("active_mode", "prose")})
+
+
+@app.put("/api/modes")
+async def put_modes(payload: dict = Body(...)) -> JSONResponse:
+    modes = payload.get("modes")
+    if not isinstance(modes, list) or not modes:
+        raise HTTPException(status_code=400, detail="modes must be a non-empty list")
+    state = await asyncio.to_thread(store.save_modes, modes, payload.get("active"))
+    return JSONResponse({"modes": state["modes"], "active": state.get("active_mode")})
+
+
+@app.post("/api/modes/reset")
+async def reset_modes() -> JSONResponse:
+    """Restore the shipped prompts. Learned vocabulary is left alone."""
+    state = await asyncio.to_thread(store.save_modes, store.DEFAULT_MODES)
+    return JSONResponse({"modes": state["modes"], "active": state.get("active_mode")})
+
+
+@app.post("/api/modes/active")
+async def post_active_mode(payload: dict = Body(...)) -> JSONResponse:
+    mode_id = payload.get("id")
+    if not mode_id:
+        raise HTTPException(status_code=400, detail="id is required")
+    state = await asyncio.to_thread(store.set_active_mode, mode_id)
+    return JSONResponse({"active": state.get("active_mode")})
+
+
+@app.get("/api/commands")
+async def get_commands() -> JSONResponse:
+    """Phrases handled without an LLM. Clients match these locally."""
+    return JSONResponse(store.DEFAULT_COMMANDS)
+
+
+@app.get("/api/vocab")
+async def get_vocab() -> JSONResponse:
+    state = store.read_state()
+    return JSONResponse({"vocab": state["vocab"], "hotwords": store.hotwords(),
+                         "promote_at": store.VOCAB_PROMOTE_AT})
+
+
+@app.post("/api/vocab")
+async def post_vocab(payload: dict = Body(...)) -> JSONResponse:
+    """Record a term the user actually meant, optionally with what was heard."""
+    terms = payload.get("terms")
+    if isinstance(terms, list):
+        vocab = None
+        for item in terms:
+            if isinstance(item, dict):
+                vocab = await asyncio.to_thread(store.learn, item.get("term", ""), item.get("heard"))
+            else:
+                vocab = await asyncio.to_thread(store.learn, str(item))
+        vocab = vocab if vocab is not None else store.read_state()["vocab"]
+    else:
+        vocab = await asyncio.to_thread(store.learn, payload.get("term", ""), payload.get("heard"))
+    return JSONResponse({"vocab": vocab, "hotwords": store.hotwords()})
+
+
+@app.delete("/api/vocab/{term}")
+async def delete_vocab(term: str) -> JSONResponse:
+    vocab = await asyncio.to_thread(store.forget, term)
+    return JSONResponse({"vocab": vocab, "hotwords": store.hotwords()})
+
+
 @app.post("/api/llm/edit")
 async def llm_edit(payload: dict = Body(...)) -> JSONResponse:
     """Apply a spoken instruction to a passage of text."""
     text = payload.get("text") or ""
     instruction = payload.get("instruction") or ""
+    # A mode supplies the prompt, model and temperature unless the caller
+    # overrides them explicitly -- the desktop client will lean on this.
+    mode = store.get_mode(payload.get("mode"))
+    task = payload.get("task") or "edit"
+    mode_prompt = mode.get("dictation_prompt") if task == "dictate" else mode.get("system_prompt")
     try:
         result = await asyncio.to_thread(
             llm.edit_text,
             text,
             instruction,
-            model=payload.get("model"),
-            system_prompt=payload.get("system_prompt"),
-            temperature=float(payload.get("temperature") or 0.2),
+            model=payload.get("model") or mode.get("model") or None,
+            system_prompt=payload.get("system_prompt") or mode_prompt,
+            temperature=float(payload["temperature"]) if payload.get("temperature") is not None
+                        else float(mode.get("temperature", 0.2)),
             api_key=payload.get("api_key"),
+            allow_empty_instruction=(task == "dictate"),
         )
     except llm.LLMError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc))

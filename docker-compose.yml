@@ -19,10 +19,13 @@ services:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-anthropic/claude-haiku-4.5}
       HF_HOME: /tmp/hf
+      STORE_PATH: /data/store.json
     volumes:
       # Weights stay on the host: rebuilding the image never re-copies 17 GB.
       - ${MODEL_DIR:-./models}:/models:ro
       - ./samples:/samples:ro
+      # Modes and learned vocabulary, so they survive a rebuild.
+      - ./data:/data
     ports:
       - "127.0.0.1:${API_PORT:-8001}:8000"   # direct API access, e.g. for curl
     shm_size: "2gb"

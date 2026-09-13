@@ -1,4 +1,5 @@
-models/
+data/
 .env
-__pycache__/
+models/
 *.pyc
+__pycache__/

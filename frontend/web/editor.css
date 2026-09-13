@@ -175,3 +175,81 @@ kbd {
 @media (max-width: 1100px) {
   .actions { grid-template-columns: 1fr; }
 }
+
+/* ------------------------------------------------------- talk control */
+
+.talk { display: flex; flex-direction: column; align-items: center; gap: 9px; padding: 4px 0 2px; }
+
+.talk-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 11px;
+  min-width: 290px; min-height: 54px; padding: 13px 28px;
+  font: inherit; font-size: 15px; font-weight: 600; cursor: pointer;
+  border-radius: 999px; border: 1px solid #5878f0; color: #fff;
+  background: linear-gradient(180deg, #6d8cff, #5878f0);
+  box-shadow: 0 6px 22px -10px rgba(109,140,255,.85);
+  transition: transform .08s, box-shadow .16s, background .16s, border-color .16s;
+  user-select: none; -webkit-user-select: none;
+}
+.talk-btn svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+.talk-btn:hover { background: linear-gradient(180deg, #7e99ff, #6584f5); }
+.talk-btn:active { transform: translateY(1px) scale(.995); }
+.talk-btn.is-edit { background: linear-gradient(180deg, #56d6a5, #35b98a); border-color: #35b98a; }
+.talk-btn.is-edit:hover { background: linear-gradient(180deg, #6ae0b4, #3fc796); }
+.talk-btn.is-recording {
+  background: linear-gradient(180deg, #ff5f6d, #e8404f) !important; border-color: #e8404f !important;
+  box-shadow: 0 0 0 6px rgba(255,77,94,.14), 0 6px 22px -10px rgba(255,77,94,.9);
+  animation: talkpulse 1.3s ease-in-out infinite;
+}
+@keyframes talkpulse { 50% { box-shadow: 0 0 0 12px rgba(255,77,94,.07), 0 6px 22px -10px rgba(255,77,94,.9); } }
+
+.talk-meta { display: flex; flex-direction: column; align-items: center; gap: 3px; text-align: center; }
+.talk-meta span { font-size: 11.8px; color: var(--muted); line-height: 1.5; }
+.talk-target { font-family: var(--mono); font-size: 10.8px; color: #6c7789; }
+
+/* ------------------------------------------------------------- modes */
+
+.mode-select {
+  width: 100%; padding: 9px 11px; border-radius: var(--radius-sm);
+  border: 1px solid var(--line); background: #0d1017; color: var(--fg);
+  font: inherit; font-size: 13.5px;
+}
+.mode-select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+#dictation-prompt, #system-prompt {
+  font-family: var(--mono); font-size: 11.3px; line-height: 1.55; resize: vertical;
+}
+
+/* -------------------------------------------------------- vocabulary */
+
+.vocab { display: flex; flex-direction: column; gap: 6px; max-height: 210px; overflow-y: auto; margin-bottom: 10px; }
+.vocab-item {
+  display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 8px;
+  padding: 7px 9px; border-radius: var(--radius-sm);
+  border: 1px solid var(--line-soft); background: var(--surface-2); font-size: 12px;
+}
+.vocab-item.promoted { border-color: rgba(61,220,151,.35); background: rgba(61,220,151,.07); }
+.vocab-item b { font-family: var(--mono); font-size: 11.5px; color: var(--fg); }
+.vocab-item span { grid-column: 1 / -1; font-size: 10.8px; color: var(--muted); }
+.vocab-item em { font-style: normal; font-family: var(--mono); font-size: 10.5px; color: #6c7789; }
+.vocab-del {
+  border: 0; background: transparent; color: #6c7789; cursor: pointer;
+  font-size: 15px; line-height: 1; padding: 0 2px;
+}
+.vocab-del:hover { color: var(--rec); }
+
+.vocab-add { display: flex; gap: 7px; }
+.vocab-add input {
+  flex: 1; min-width: 0; padding: 7px 10px; border-radius: var(--radius-sm);
+  border: 1px solid var(--line); background: #0d1017; color: var(--fg); font: inherit; font-size: 12.5px;
+}
+.vocab-add input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.vocab-add .btn { min-height: 32px; padding: 6px 12px; font-size: 12.5px; }
+
+/* ---------------------------------------------------------- commands */
+
+.commands { display: grid; grid-template-columns: 1fr; gap: 5px; max-height: 210px; overflow-y: auto; }
+.cmd {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 5px 8px; border-radius: 6px; background: var(--surface-2); font-size: 11.8px;
+}
+.cmd b { font-weight: 500; color: var(--fg-dim); }
+.cmd span { margin-left: auto; font-family: var(--mono); font-size: 10.2px; color: #6c7789; }

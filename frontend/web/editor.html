@@ -59,10 +59,16 @@
 
       <label class="switch">
         <input type="checkbox" id="review-mode" checked>
-        <span>Review the instruction before applying</span>
+        <span>Pause to show what was heard</span>
       </label>
-      <small class="switch-note">On: you see what was heard and press Enter to run it.
-        Off: the edit fires the moment you stop talking &mdash; <kbd>Esc</kbd> still cancels it mid-flight.</small>
+      <small class="switch-note">On: the instruction is shown for a moment before it runs, so you can
+        <kbd>Esc</kbd> out of a mishear or fix a word. It applies on its own when the bar runs out &mdash;
+        it never sits waiting for you. Typing in the box stops the timer.</small>
+
+      <label class="field" style="margin-top:12px">
+        <span>Grace period <b id="grace-val">2.5s</b></span>
+        <input type="range" id="grace" min="0.5" max="8" step="0.5" value="2.5">
+      </label>
     </section>
 
     <section class="panel">
@@ -93,6 +99,21 @@
     <textarea id="doc" class="doc" spellcheck="false"
       placeholder="Type or dictate here, then select a passage and tell the model what to change."></textarea>
 
+    <div class="instruction" id="instruction" hidden>
+      <div class="instruction-head">
+        <span class="instruction-label" id="instruction-label">instruction</span>
+        <span class="instruction-hint" id="instruction-hint"><kbd>Esc</kbd> cancels</span>
+      </div>
+      <textarea id="instruction-text" rows="2" spellcheck="false" readonly
+        placeholder="listening…"></textarea>
+      <div class="countdown" id="countdown" hidden><div class="countdown-fill" id="countdown-fill"></div></div>
+      <div class="instruction-actions" id="instruction-actions" hidden>
+        <button class="btn btn-primary" id="btn-apply">Apply now &nbsp;<kbd>&crarr;</kbd></button>
+        <button class="btn" id="btn-discard">Cancel &nbsp;<kbd>Esc</kbd></button>
+        <button class="btn btn-ghost" id="btn-rerecord">Say it again</button>
+      </div>
+    </div>
+
     <div class="actions">
       <div class="action-card">
         <div class="action-head">
@@ -117,19 +138,6 @@
       </div>
     </div>
 
-    <div class="instruction" id="instruction" hidden>
-      <div class="instruction-head">
-        <span class="instruction-label" id="instruction-label">instruction</span>
-        <span class="instruction-hint" id="instruction-hint"><kbd>Esc</kbd> cancels</span>
-      </div>
-      <textarea id="instruction-text" rows="2" spellcheck="false" readonly
-        placeholder="listening…"></textarea>
-      <div class="instruction-actions" id="instruction-actions" hidden>
-        <button class="btn btn-primary" id="btn-apply">Apply edit &nbsp;<kbd>&crarr;</kbd></button>
-        <button class="btn" id="btn-discard">Discard &nbsp;<kbd>Esc</kbd></button>
-        <button class="btn btn-ghost" id="btn-rerecord">Say it again</button>
-      </div>
-    </div>
 
     <div class="panel result" id="result" hidden>
       <div class="result-head">

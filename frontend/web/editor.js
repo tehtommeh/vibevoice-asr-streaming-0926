@@ -4,7 +4,7 @@
 'use strict';
 
 const $ = (id) => document.getElementById(id);
-const LS = { key: 'vv.openrouter.key', model: 'vv.openrouter.model', prompt: 'vv.system.prompt', review: 'vv.review' };
+const LS = { key: 'vv.openrouter.key', model: 'vv.openrouter.model', prompt: 'vv.system.prompt', review: 'vv.review', grace: 'vv.grace' };
 
 const SAMPLE = `We deployed the new service to cooper netties last Tuesday and it's been running fine since. The main thing that changed is we moved the ingest path off of the old queue and onto red is streams, which cut the tail latency by about a third.
 
@@ -15,6 +15,7 @@ const state = {
   heard: '', models: [], serverKey: false, defaultPrompt: '',
   selection: null, undoStack: [], asrMs: null,
   awaitingReview: false, editAbort: null, lastInstruction: null, lastSelection: null,
+  countdownTimer: null,
 };
 
 /* True whenever Esc has something to cancel. */
@@ -79,19 +80,55 @@ function showInstruction(label, { editable = false, hint = '<kbd>Esc</kbd> cance
   box.readOnly = !editable;
   box.classList.toggle('editable', editable);
   $('instruction-actions').hidden = !editable;
-  if (editable) { box.focus(); box.setSelectionRange(box.value.length, box.value.length); }
+  if (editable) {
+    // Focus after a frame: resetControls() rewrites the buttons just before
+    // this runs, which drops focus to <body> if we grab it too early.
+    requestAnimationFrame(() => {
+      box.focus();
+      box.setSelectionRange(box.value.length, box.value.length);
+    });
+  }
+  // The panel is useless if it is under the fold, which is exactly where it
+  // landed on a short viewport.
+  $('instruction').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 
 function hideInstruction() {
+  stopCountdown();
   $('instruction').hidden = true;
   $('instruction-text').value = '';
   $('instruction-actions').hidden = true;
   state.awaitingReview = false;
 }
 
+/* The grace period. It always resolves on its own -- the flow must never sit
+   waiting for a keypress the user may not have noticed was needed. */
+function startCountdown(onElapsed) {
+  stopCountdown();
+  const ms = Math.round(parseFloat($('grace').value) * 1000);
+  const bar = $('countdown'), fill = $('countdown-fill');
+  bar.hidden = false;
+  fill.style.transition = 'none';
+  fill.style.width = '100%';
+  // Force a reflow so the transition starts from 100%.
+  void fill.offsetWidth;
+  fill.style.transition = `width ${ms}ms linear`;
+  fill.style.width = '0%';
+  state.countdownTimer = setTimeout(() => { state.countdownTimer = null; onElapsed(); }, ms);
+}
+
+function stopCountdown() {
+  if (state.countdownTimer) { clearTimeout(state.countdownTimer); state.countdownTimer = null; }
+  const fill = $('countdown-fill');
+  fill.style.transition = 'none';
+  fill.style.width = '0%';
+  $('countdown').hidden = true;
+}
+
 /* One key, one meaning: stop whatever is happening and change nothing. */
 function cancelAll(reason) {
   const wasDoing = inFlight();
+  stopCountdown();
   if (state.editAbort) { state.editAbort.abort(); state.editAbort = null; }
   stopRecording(false);
   hideInstruction();
@@ -288,13 +325,17 @@ async function finishRecording(ev) {
 
   $('instruction-text').value = heard;
   if ($('review-mode').checked) {
-    // Hold here so a mis-heard instruction can be corrected or thrown away
-    // before it costs an API call and a wrong edit.
+    // Show it briefly so a mis-heard instruction can be killed or corrected,
+    // then apply on its own. A gate that waits forever reads as a hang.
     state.awaitingReview = true;
     resetControls();
-    showInstruction('instruction — check it', {
+    showInstruction('heard — applying shortly', {
       editable: true,
-      hint: 'edit it, <kbd>&crarr;</kbd> to apply, <kbd>Esc</kbd> to discard',
+      hint: '<kbd>&crarr;</kbd> now · <kbd>Esc</kbd> cancel · type to hold',
+    });
+    startCountdown(() => {
+      if (!state.awaitingReview) return;
+      runEdit($('instruction-text').value.trim());
     });
     return;
   }
@@ -308,6 +349,7 @@ async function runEdit(instruction) {
   if (!sel.text.trim()) { toast('There is no text to edit.', true); resetControls(); resetSteps(); return; }
 
   state.awaitingReview = false;
+  stopCountdown();
   state.lastInstruction = instruction;
   state.lastSelection = sel;
   showInstruction('editing…', { hint: '<kbd>Esc</kbd> cancels before anything is replaced' });
@@ -483,8 +525,14 @@ function init() {
     startRecording('edit').then(() => { if (sel) state.selection = sel; });
   });
 
-  $('instruction-text').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey && state.awaitingReview) { e.preventDefault(); applyReviewed(); }
+  // Touching the instruction means you are fixing it -- stop the clock and wait
+  // for an explicit Enter rather than firing a half-typed correction.
+  $('instruction-text').addEventListener('input', () => {
+    if (state.countdownTimer) {
+      stopCountdown();
+      $('instruction-label').textContent = 'heard — edited, press Enter';
+      $('instruction-hint').innerHTML = '<kbd>&crarr;</kbd> to apply · <kbd>Esc</kbd> to cancel';
+    }
   });
 
   $('btn-retry').addEventListener('click', () => {
@@ -499,12 +547,28 @@ function init() {
   const savedReview = localStorage.getItem(LS.review);
   if (savedReview !== null) $('review-mode').checked = savedReview === '1';
 
+  const showGrace = () => { $('grace-val').textContent = parseFloat($('grace').value).toFixed(1) + 's'; };
+  $('grace').addEventListener('input', () => {
+    showGrace();
+    localStorage.setItem(LS.grace, $('grace').value);
+  });
+  const savedGrace = localStorage.getItem(LS.grace);
+  if (savedGrace !== null) $('grace').value = savedGrace;
+  showGrace();
+
   // In-page stand-ins for the eventual global hotkeys.
   window.addEventListener('keydown', (e) => {
     // Esc means the same thing at every stage: stop, change nothing.
     if (e.key === 'Escape' && inFlight()) {
       e.preventDefault();
       cancelAll();
+      return;
+    }
+    // Enter applies wherever focus happens to be -- requiring the textarea to
+    // hold focus made this look like a hang when it did not.
+    if (e.key === 'Enter' && !e.shiftKey && state.awaitingReview && e.target.id !== 'doc') {
+      e.preventDefault();
+      applyReviewed();
       return;
     }
     if (!e.ctrlKey || !e.shiftKey) return;

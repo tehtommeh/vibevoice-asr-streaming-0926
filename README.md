@@ -67,12 +67,23 @@ a desktop client can hit the same endpoint later. Set `OPENROUTER_API_KEY` in
 which mode it is in).
 
 **Cancelling.** Speech recognition mishears, so `Esc` means *stop, change
-nothing* at every stage — while recording, while transcribing, and while the
-LLM call is in flight. With **Review the instruction before applying** on (the
-default), what was heard is shown in an editable box first: fix a wrong word and
-press Enter, or `Esc` to throw it away without spending an API call. **Retry**
-undoes the last edit and re-runs the same instruction, which is how you compare
-models or prompt changes. Everything is undoable.
+nothing* at every stage — while recording, while transcribing, during the grace
+period, and while the LLM call is in flight (the request is aborted before any
+text is replaced).
+
+With **Pause to show what was heard** on (the default), the transcribed
+instruction appears under the document for a grace period — 2.5 s by default,
+adjustable — and then applies on its own. It is a window to bail out of, not a
+gate that waits for you: nothing ever stalls waiting for a keypress. During it:
+
+| | |
+|---|---|
+| `Enter` | apply now, from wherever focus is |
+| `Esc` | cancel, no API call made |
+| type in the box | stops the timer, so you can fix a misheard word and press Enter |
+
+**Retry** undoes the last edit and re-runs the same instruction, which is how you
+compare models or prompt changes. Everything is undoable.
 
 The system prompt is an editable textarea in the left rail — it is the entire
 behaviour of the edit pass, so tune it there and re-run.

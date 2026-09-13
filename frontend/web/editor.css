@@ -87,8 +87,9 @@ kbd {
 
 .instruction {
   padding: 12px 14px; border-radius: var(--radius);
-  border: 1px solid rgba(109,140,255,.32); background: var(--accent-soft);
+  border: 1px solid rgba(109,140,255,.45); background: var(--accent-soft);
   display: flex; flex-direction: column; gap: 9px;
+  box-shadow: 0 0 0 3px rgba(109,140,255,.10);
 }
 .instruction-head { display: flex; align-items: baseline; gap: 10px; }
 .instruction-label {
@@ -109,6 +110,14 @@ kbd {
 }
 #instruction-text.editable:focus {
   outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.countdown {
+  height: 3px; border-radius: 2px; background: rgba(109,140,255,.18); overflow: hidden;
+}
+.countdown-fill {
+  height: 100%; width: 100%; border-radius: 2px;
+  background: linear-gradient(90deg, var(--accent), var(--ok));
 }
 
 .instruction-actions { display: flex; gap: 8px; flex-wrap: wrap; }

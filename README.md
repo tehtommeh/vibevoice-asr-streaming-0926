@@ -167,9 +167,23 @@ shards.
 ### 2. Build and start
 
 ```bash
-docker compose up -d --build
-docker compose logs -f backend        # watch the checkpoint load
+docker compose up -d --build          # first time only
+./run.sh                              # every day after that
 ```
+
+`run.sh` waits for the checkpoint to load and prints the URLs:
+
+| | |
+|---|---|
+| `./run.sh` | start, wait for the model, print the URLs |
+| `./run.sh stop` | shut down and free the GPU |
+| `./run.sh status` | what is running, and whether the model is loaded |
+| `./run.sh logs` | follow the backend log |
+| `./run.sh restart` | stop, then start |
+
+Stopping keeps everything that matters: the weights in `./models`, your modes
+and learned vocabulary in `./data`, and your API key in `.env`. A warm restart
+takes about 10 seconds.
 
 The first start reads 17 GB off disk and onto the GPU; later restarts take a few
 seconds because the weights are still in the page cache. The UI shows a loading

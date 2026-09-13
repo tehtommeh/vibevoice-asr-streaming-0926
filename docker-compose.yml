@@ -1,0 +1,42 @@
+# Local VibeVoice-ASR-Streaming-7B demo: GPU backend + web UI.
+#   docker compose up -d   ->  http://localhost:8080
+
+services:
+  backend:
+    build: ./backend
+    image: vibevoice-asr-backend:latest
+    container_name: vibevoice-backend
+    restart: unless-stopped
+    environment:
+      MODEL_PATH: /models/VibeVoice-ASR-Streaming-7B
+      SAMPLES_DIR: /samples
+      DEVICE: cuda
+      ATTN_IMPLEMENTATION: ${ATTN_IMPLEMENTATION:-sdpa}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-200}
+      MAX_AUDIO_SECONDS: ${MAX_AUDIO_SECONDS:-1800}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      HF_HOME: /tmp/hf
+    volumes:
+      # Weights stay on the host: rebuilding the image never re-copies 17 GB.
+      - ${MODEL_DIR:-./models}:/models:ro
+      - ./samples:/samples:ro
+    ports:
+      - "127.0.0.1:${API_PORT:-8001}:8000"   # direct API access, e.g. for curl
+    shm_size: "2gb"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  frontend:
+    build: ./frontend
+    image: vibevoice-asr-frontend:latest
+    container_name: vibevoice-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8080}:80"

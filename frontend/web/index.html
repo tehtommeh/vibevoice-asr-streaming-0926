@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VibeVoice Streaming ASR</title>
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🎙️</text></svg>">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark" aria-hidden="true">
+      <span></span><span></span><span></span><span></span><span></span>
+    </div>
+    <div class="brand-text">
+      <h1>VibeVoice Streaming ASR</h1>
+      <p>microsoft/VibeVoice-ASR-Streaming-7B &middot; local GPU</p>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <div class="health" id="health">
+      <span class="dot" id="health-dot"></span>
+      <span id="health-text">connecting…</span>
+    </div>
+    <div class="gpu-pill" id="gpu-pill" hidden></div>
+  </div>
+</header>
+
+<div id="loading-banner" class="banner" hidden>
+  <span class="spinner"></span>
+  <div>
+    <strong>Loading the checkpoint onto the GPU…</strong>
+    <span id="loading-detail">17 GB of weights — this takes a minute on first start.</span>
+  </div>
+</div>
+
+<main class="layout">
+
+  <!-- ------------------------------------------------ source + params -->
+  <aside class="rail rail-left">
+    <nav class="tabs" role="tablist">
+      <button class="tab is-active" data-mode="mic" role="tab">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a3.5 3.5 0 0 0 3.5-3.5v-5a3.5 3.5 0 0 0-7 0v5A3.5 3.5 0 0 0 12 15Z"/><path d="M6 11a6 6 0 0 0 12 0M12 17v4M9 21h6"/></svg>
+        Live
+      </button>
+      <button class="tab" data-mode="file" role="tab">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3v5h5"/><path d="M5 3h9l5 5v13H5z"/></svg>
+        File
+      </button>
+      <button class="tab" data-mode="examples" role="tab">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+        Examples
+      </button>
+      <button class="tab" data-mode="compare" role="tab">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18"/><path d="M6 8 3 12l3 4"/><path d="m18 8 3 4-3 4"/></svg>
+        A/B
+      </button>
+    </nav>
+
+    <!-- Live -->
+    <section class="panel mode-panel" data-panel="mic">
+      <h2>Microphone</h2>
+      <p class="hint">Transcription starts while you are still talking — the model emits text every <b id="chunk-secs">2.9</b>s of audio.</p>
+      <canvas id="scope" class="scope" width="600" height="90"></canvas>
+      <div class="btn-row">
+        <button class="btn btn-primary" id="btn-record">
+          <span class="rec-dot"></span> Record
+        </button>
+        <button class="btn" id="btn-stop" disabled>Stop</button>
+      </div>
+      <div class="mic-meta">
+        <span id="mic-timer">00:00</span>
+        <span id="mic-backlog"></span>
+      </div>
+    </section>
+
+    <!-- File -->
+    <section class="panel mode-panel" data-panel="file" hidden>
+      <h2>Audio or video file</h2>
+      <label class="dropzone" id="dropzone">
+        <input type="file" id="file-input" accept="audio/*,video/*,.mp3,.wav,.m4a,.flac,.ogg,.opus,.mp4,.webm,.mov">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L8 8m4-4 4 4"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+        <strong id="drop-title">Drop a file or click to browse</strong>
+        <span>mp3 · wav · m4a · flac · ogg · mp4 · webm — decoded server-side with ffmpeg</span>
+      </label>
+      <div class="btn-row">
+        <button class="btn btn-primary" id="btn-transcribe" disabled>Transcribe</button>
+        <button class="btn" id="btn-cancel-file" disabled>Cancel</button>
+      </div>
+    </section>
+
+    <!-- Examples -->
+    <section class="panel mode-panel" data-panel="examples" hidden>
+      <h2>Bundled examples</h2>
+      <div id="examples-list" class="examples"></div>
+    </section>
+
+    <!-- A/B -->
+    <section class="panel mode-panel" data-panel="compare" hidden>
+      <h2>Hotwords A/B</h2>
+      <p class="hint">Runs the same audio twice — once cold, once with your hotwords — so you can see exactly what the bias changes.</p>
+      <div id="compare-source" class="compare-source"></div>
+      <div class="btn-row">
+        <button class="btn btn-primary" id="btn-compare" disabled>Run both</button>
+      </div>
+    </section>
+
+    <!-- Params -->
+    <section class="panel">
+      <h2>Decoding</h2>
+      <label class="field">
+        <span>Hotwords <em>context_info</em></span>
+        <textarea id="hotwords" rows="2" placeholder="VibeVoice, Microsoft, Qwen, tokenizer"></textarea>
+        <small>Comma-separated names and jargon to bias recognition toward.</small>
+      </label>
+      <label class="field">
+        <span>Temperature <b id="temp-val">0.00</b></span>
+        <input type="range" id="temperature" min="0" max="1.5" step="0.05" value="0">
+        <small>0 = greedy. Raise it to sample.</small>
+      </label>
+      <label class="field">
+        <span>Max tokens / chunk <b id="maxtok-val">256</b></span>
+        <input type="range" id="max-tokens" min="32" max="512" step="32" value="256">
+      </label>
+      <label class="switch">
+        <input type="checkbox" id="show-raw">
+        <span>Show raw model output</span>
+      </label>
+    </section>
+  </aside>
+
+  <!-- ------------------------------------------------------- transcript -->
+  <section class="stage">
+    <div class="stage-head">
+      <div class="stage-title">
+        <h2>Transcript</h2>
+        <span class="chip" id="stage-status">idle</span>
+      </div>
+      <div class="stage-actions">
+        <button class="btn btn-ghost" id="btn-copy">Copy</button>
+        <button class="btn btn-ghost" id="btn-json">Download JSON</button>
+        <button class="btn btn-ghost" id="btn-clear">Clear</button>
+      </div>
+    </div>
+
+    <div id="player-bar" class="player-bar" hidden>
+      <audio id="player" controls preload="metadata"></audio>
+      <span class="player-label" id="player-label"></span>
+    </div>
+
+    <div class="transcript-wrap">
+      <div id="transcript" class="transcript" aria-live="polite"></div>
+      <div id="empty-state" class="empty">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a3.5 3.5 0 0 0 3.5-3.5v-5a3.5 3.5 0 0 0-7 0v5A3.5 3.5 0 0 0 12 15Z"/><path d="M6 11a6 6 0 0 0 12 0M12 17v4"/></svg>
+        <p><b>Speak, drop in a file, or pick an example.</b><br>
+        Text appears speaker-by-speaker as the audio arrives — nothing waits for the end.</p>
+      </div>
+    </div>
+
+    <div id="raw-panel" class="raw-panel" hidden>
+      <h3>Raw model output <small>speaker markers left in</small></h3>
+      <pre id="raw-text"></pre>
+    </div>
+
+    <div id="compare-grid" class="compare-grid" hidden>
+      <div class="compare-col">
+        <h3>Without hotwords</h3>
+        <div class="transcript compact" id="compare-a"></div>
+      </div>
+      <div class="compare-col">
+        <h3>With hotwords <span class="chip chip-accent" id="compare-words"></span></h3>
+        <div class="transcript compact" id="compare-b"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- --------------------------------------------------------- telemetry -->
+  <aside class="rail rail-right">
+    <section class="panel">
+      <h2>Live telemetry</h2>
+      <div class="stat-grid">
+        <div class="stat"><span class="stat-k">Chunks</span><span class="stat-v" id="m-chunks">—</span></div>
+        <div class="stat"><span class="stat-k">Tokens</span><span class="stat-v" id="m-tokens">—</span></div>
+        <div class="stat"><span class="stat-k">Audio</span><span class="stat-v" id="m-audio">—</span></div>
+        <div class="stat"><span class="stat-k">Elapsed</span><span class="stat-v" id="m-elapsed">—</span></div>
+      </div>
+      <div class="rtf">
+        <div class="rtf-head"><span>Real-time factor</span><b id="m-rtf">—</b></div>
+        <div class="rtf-bar"><div class="rtf-fill" id="rtf-fill"></div><div class="rtf-mark"></div></div>
+        <small id="rtf-note">1.0 = exactly real time. Lower is faster than the audio.</small>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Chunk latency</h2>
+      <canvas id="latency-chart" class="latency-chart" width="560" height="120"></canvas>
+      <div class="stat-grid two three">
+        <div class="stat"><span class="stat-k">Last</span><span class="stat-v" id="m-lat-last">—</span></div>
+        <div class="stat"><span class="stat-k">Average</span><span class="stat-v" id="m-lat-avg">—</span></div>
+        <div class="stat"><span class="stat-k">1st tok</span><span class="stat-v" id="m-lat-first">—</span></div>
+      </div>
+      <small class="hint">Wall-clock to encode one window and decode its text. Anything under the chunk length keeps up with live audio.</small>
+    </section>
+
+    <section class="panel">
+      <h2>Model</h2>
+      <dl class="kv" id="model-kv"></dl>
+      <small class="hint" style="margin:10px 0 0">Speaker-attributed streaming ASR in <b id="lang-count">10</b> languages, with hotword biasing.</small>
+    </section>
+  </aside>
+</main>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>

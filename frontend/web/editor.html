@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice Editing — VibeVoice</title>
+<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="editor.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🗣️</text></svg>">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark" aria-hidden="true">
+      <span></span><span></span><span></span><span></span><span></span>
+    </div>
+    <div class="brand-text">
+      <h1>Voice Editing</h1>
+      <p>Select text · say what to change · VibeVoice → LLM</p>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <a class="navlink" href="/">ASR demo →</a>
+    <div class="health" id="health">
+      <span class="dot" id="health-dot"></span>
+      <span id="health-text">connecting…</span>
+    </div>
+  </div>
+</header>
+
+<main class="layout editor-layout">
+
+  <!-- ---------------------------------------------------------- settings -->
+  <aside class="rail rail-left">
+    <section class="panel">
+      <h2>OpenRouter</h2>
+      <div id="key-server" class="key-note ok" hidden>
+        Using the key from the backend environment. Nothing is stored in this browser.
+      </div>
+      <label class="field" id="key-field">
+        <span>API key</span>
+        <input type="password" id="api-key" placeholder="sk-or-v1-…" autocomplete="off" spellcheck="false">
+        <small>Kept in this browser's localStorage and sent to your local backend only.
+          To avoid storing it here, put <code>OPENROUTER_API_KEY</code> in <code>.env</code> and restart.</small>
+      </label>
+
+      <label class="field">
+        <span>Model <b id="model-count"></b></span>
+        <input type="text" id="model-search" placeholder="filter models…" spellcheck="false">
+        <select id="model" size="8"></select>
+        <small id="model-price">—</small>
+      </label>
+
+      <label class="field">
+        <span>Temperature <b id="temp-val">0.20</b></span>
+        <input type="range" id="temperature" min="0" max="1.5" step="0.05" value="0.2">
+      </label>
+
+      <label class="switch">
+        <input type="checkbox" id="review-mode" checked>
+        <span>Review the instruction before applying</span>
+      </label>
+      <small class="switch-note">On: you see what was heard and press Enter to run it.
+        Off: the edit fires the moment you stop talking &mdash; <kbd>Esc</kbd> still cancels it mid-flight.</small>
+    </section>
+
+    <section class="panel">
+      <h2>System prompt</h2>
+      <p class="hint">This is the whole behaviour of the edit pass — change it and re-run to iterate.</p>
+      <textarea id="system-prompt" rows="10" spellcheck="false"></textarea>
+      <div class="btn-row">
+        <button class="btn" id="btn-reset-prompt">Reset to default</button>
+      </div>
+    </section>
+  </aside>
+
+  <!-- ------------------------------------------------------------- stage -->
+  <section class="stage">
+
+    <div class="stage-head">
+      <div class="stage-title">
+        <h2>Scratch document</h2>
+        <span class="chip" id="sel-info">nothing selected</span>
+      </div>
+      <div class="stage-actions">
+        <button class="btn btn-ghost" id="btn-undo" disabled>Undo</button>
+        <button class="btn btn-ghost" id="btn-sample">Load sample</button>
+        <button class="btn btn-ghost" id="btn-clear-doc">Clear</button>
+      </div>
+    </div>
+
+    <textarea id="doc" class="doc" spellcheck="false"
+      placeholder="Type or dictate here, then select a passage and tell the model what to change."></textarea>
+
+    <div class="actions">
+      <div class="action-card">
+        <div class="action-head">
+          <h3>Dictate</h3>
+          <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>D</kbd>
+        </div>
+        <p>Verbatim speech at the cursor. Replaces the selection if there is one.</p>
+        <button class="btn btn-primary" id="btn-dictate">
+          <span class="rec-dot"></span> Start dictating
+        </button>
+      </div>
+
+      <div class="action-card accent">
+        <div class="action-head">
+          <h3>Voice edit</h3>
+          <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>E</kbd>
+        </div>
+        <p>Say what to change about the selection. Falls back to the whole document if nothing is selected.</p>
+        <button class="btn btn-primary" id="btn-edit">
+          <span class="rec-dot"></span> Speak an instruction
+        </button>
+      </div>
+    </div>
+
+    <div class="instruction" id="instruction" hidden>
+      <div class="instruction-head">
+        <span class="instruction-label" id="instruction-label">instruction</span>
+        <span class="instruction-hint" id="instruction-hint"><kbd>Esc</kbd> cancels</span>
+      </div>
+      <textarea id="instruction-text" rows="2" spellcheck="false" readonly
+        placeholder="listening…"></textarea>
+      <div class="instruction-actions" id="instruction-actions" hidden>
+        <button class="btn btn-primary" id="btn-apply">Apply edit &nbsp;<kbd>&crarr;</kbd></button>
+        <button class="btn" id="btn-discard">Discard &nbsp;<kbd>Esc</kbd></button>
+        <button class="btn btn-ghost" id="btn-rerecord">Say it again</button>
+      </div>
+    </div>
+
+    <div class="panel result" id="result" hidden>
+      <div class="result-head">
+        <h3>Last edit</h3>
+        <span class="chip" id="result-meta"></span>
+        <button class="btn btn-ghost" id="btn-retry" title="Undo and run the same instruction again">Retry</button>
+      </div>
+      <div class="diff" id="diff"></div>
+    </div>
+  </section>
+
+  <!-- --------------------------------------------------------- telemetry -->
+  <aside class="rail rail-right">
+    <section class="panel">
+      <h2>Pipeline</h2>
+      <ol class="steps" id="steps">
+        <li data-step="record"><span></span>Record</li>
+        <li data-step="asr"><span></span>Transcribe (local)</li>
+        <li data-step="llm"><span></span>Edit (OpenRouter)</li>
+        <li data-step="apply"><span></span>Replace selection</li>
+      </ol>
+      <div class="stat-grid two three">
+        <div class="stat"><span class="stat-k">ASR</span><span class="stat-v" id="m-asr">—</span></div>
+        <div class="stat"><span class="stat-k">LLM</span><span class="stat-v" id="m-llm">—</span></div>
+        <div class="stat"><span class="stat-k">Cost</span><span class="stat-v" id="m-cost">—</span></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>History</h2>
+      <div id="history" class="history"><p class="hint">Edits you make will be listed here.</p></div>
+    </section>
+  </aside>
+</main>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="editor.js"></script>
+</body>
+</html>

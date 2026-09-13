@@ -98,6 +98,14 @@ h1, h2, h3 { margin: 0; font-weight: 600; }
 .dot.err { background: var(--rec); }
 @keyframes pulse { 50% { opacity: .25; } }
 
+.navlink {
+  font-size: 12.5px; color: var(--muted); text-decoration: none;
+  padding: 6px 12px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--surface);
+  transition: color .14s, border-color .14s;
+}
+.navlink:hover { color: var(--fg); border-color: #39435c; }
+
 .gpu-pill {
   font-family: var(--mono); font-size: 11.5px; color: var(--muted);
   padding: 6px 11px; border-radius: 999px;

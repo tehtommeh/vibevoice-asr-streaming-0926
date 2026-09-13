@@ -15,6 +15,9 @@ services:
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-200}
       MAX_AUDIO_SECONDS: ${MAX_AUDIO_SECONDS:-1800}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Optional: set in .env so the key never has to live in the browser.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-anthropic/claude-haiku-4.5}
       HF_HOME: /tmp/hf
     volumes:
       # Weights stay on the host: rebuilding the image never re-copies 17 GB.

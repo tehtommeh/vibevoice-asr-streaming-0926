@@ -18,11 +18,12 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator, Callable, Optional
 
 import numpy as np
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from . import audio as audio_utils
+from . import llm
 from .engine import DecodeOptions, VibeVoiceEngine
 
 logging.basicConfig(
@@ -172,6 +173,53 @@ async def sample_audio(sample_id: str):
                 raise HTTPException(status_code=404, detail="sample file is missing")
             return FileResponse(path)
     raise HTTPException(status_code=404, detail="unknown sample")
+
+
+# ---------------------------------------------------------------------------
+# Voice editing (OpenRouter)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/llm/status")
+async def llm_status() -> JSONResponse:
+    """Whether the server holds a key, so the page can skip asking for one."""
+    return JSONResponse(
+        {
+            "server_key": llm.server_key() is not None,
+            "default_model": llm.DEFAULT_MODEL,
+            "default_system_prompt": llm.DEFAULT_SYSTEM_PROMPT,
+            "suggested": llm.SUGGESTED_MODELS,
+        }
+    )
+
+
+@app.get("/api/llm/models")
+async def llm_models(refresh: bool = False) -> JSONResponse:
+    try:
+        models = await asyncio.to_thread(llm.list_models, refresh)
+    except llm.LLMError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+    return JSONResponse(models)
+
+
+@app.post("/api/llm/edit")
+async def llm_edit(payload: dict = Body(...)) -> JSONResponse:
+    """Apply a spoken instruction to a passage of text."""
+    text = payload.get("text") or ""
+    instruction = payload.get("instruction") or ""
+    try:
+        result = await asyncio.to_thread(
+            llm.edit_text,
+            text,
+            instruction,
+            model=payload.get("model"),
+            system_prompt=payload.get("system_prompt"),
+            temperature=float(payload.get("temperature") or 0.2),
+            api_key=payload.get("api_key"),
+        )
+    except llm.LLMError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+    return JSONResponse(result)
 
 
 # ---------------------------------------------------------------------------

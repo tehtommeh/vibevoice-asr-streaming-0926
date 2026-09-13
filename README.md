@@ -9,7 +9,11 @@ audio is still arriving.
 | `backend` | FastAPI wrapper around the checkpoint, running on your GPU | `127.0.0.1:8001` |
 | `frontend` | nginx serving the demo UI and proxying `/api` to the backend | `127.0.0.1:8080` |
 
-**Open http://localhost:8080** once both are up.
+Two pages:
+
+- **http://localhost:8080** — the ASR demo (live mic, files, examples, hotword A/B)
+- **http://localhost:8080/editor.html** — **voice editing**: select text, say what to
+  change, an LLM rewrites it in place
 
 ---
 
@@ -43,6 +47,39 @@ speaker prefixes and all.
 
 Because RTF is well under 1, live transcription keeps up with the microphone
 with room to spare — the `backlog` events stay at zero.
+
+---
+
+## Voice editing
+
+`editor.html` is a browser prototype of a desktop dictation workflow, so the
+pipeline and the prompt can be tuned before any of it is wired to global
+hotkeys.
+
+- **Dictate** (`Ctrl+Shift+D`) — verbatim speech at the cursor.
+- **Voice edit** (`Ctrl+Shift+E`) — select a passage, say what to change. With
+  nothing selected it edits the whole document.
+
+The transcribed instruction and the selected text go to OpenRouter through the
+backend (`POST /api/llm/edit`) — the browser never calls OpenRouter directly, so
+a desktop client can hit the same endpoint later. Set `OPENROUTER_API_KEY` in
+`.env`, or type a key into the page (it goes to `localStorage`; the page says
+which mode it is in).
+
+**Cancelling.** Speech recognition mishears, so `Esc` means *stop, change
+nothing* at every stage — while recording, while transcribing, and while the
+LLM call is in flight. With **Review the instruction before applying** on (the
+default), what was heard is shown in an editable box first: fix a wrong word and
+press Enter, or `Esc` to throw it away without spending an API call. **Retry**
+undoes the last edit and re-runs the same instruction, which is how you compare
+models or prompt changes. Everything is undoable.
+
+The system prompt is an editable textarea in the left rail — it is the entire
+behaviour of the edit pass, so tune it there and re-run.
+
+Words from the document are harvested as ASR hotwords, along with common editing
+verbs, so an instruction naming a term already on screen is more likely to come
+through intact.
 
 ---
 

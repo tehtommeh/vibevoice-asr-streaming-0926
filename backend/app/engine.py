@@ -105,6 +105,11 @@ class TranscriptBuilder:
             if s.text.strip()
         )
 
+    @property
+    def plain_text(self) -> str:
+        """Just the words, no speaker labels -- what dictation wants."""
+        return " ".join(s.text.strip() for s in self.segments if s.text.strip())
+
     # -- scanning ---------------------------------------------------------
     def feed(self, piece: str) -> list[tuple[int, str]]:
         self.raw += piece
@@ -377,6 +382,9 @@ class StreamingSession:
     def result(self) -> dict:
         return {
             "text": self.builder.text.strip(),
+            # Same words without the speaker labels. Dictation is one person
+            # talking, and "Speaker 0:" would be pasted into their document.
+            "plain": self.builder.plain_text.strip(),
             "raw": self.builder.raw,
             "segments": self.builder.as_dicts(),
             "stats": self.stats(),
